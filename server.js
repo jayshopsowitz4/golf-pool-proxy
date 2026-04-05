@@ -847,6 +847,61 @@ app.get('/leaderboard/test', async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════
+//  POOL STORAGE  — file-backed JSON store
+//  GET  /pool/:code        → fetch pool data
+//  POST /pool/:code        → save pool data
+// ═══════════════════════════════════════════════════════════════════
+const fs = require('fs');
+const POOL_DIR = process.env.POOL_DIR || '/tmp/pools';
+if (!fs.existsSync(POOL_DIR)) fs.mkdirSync(POOL_DIR, { recursive: true });
+
+function poolFile(code) {
+  // Sanitize code — only allow alphanumeric
+  const safe = code.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!safe) throw new Error('Invalid pool code');
+  return `${POOL_DIR}/${safe}.json`;
+}
+
+app.get('/pool/:code', (req, res) => {
+  try {
+    const file = poolFile(req.params.code);
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'Pool not found' });
+    const data = fs.readFileSync(file, 'utf8');
+    res.json(JSON.parse(data));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/pool/:code', express.json({ limit: '2mb' }), (req, res) => {
+  try {
+    const file = poolFile(req.params.code);
+    fs.writeFileSync(file, JSON.stringify(req.body));
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Key-value store for email lookups and other misc data
+const KV_DIR = process.env.KV_DIR || '/tmp/kv';
+if (!fs.existsSync(KV_DIR)) fs.mkdirSync(KV_DIR, { recursive: true });
+
+app.get('/kv/:key', (req, res) => {
+  try {
+    const safe = req.params.key.replace(/[^a-zA-Z0-9@._:-]/g, '_');
+    const file = `${KV_DIR}/${safe}.json`;
+    if (!fs.existsSync(file)) return res.status(404).json({ error: 'Not found' });
+    res.json(JSON.parse(fs.readFileSync(file, 'utf8')));
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/kv/:key', express.json(), (req, res) => {
+  try {
+    const safe = req.params.key.replace(/[^a-zA-Z0-9@._:-]/g, '_');
+    fs.writeFileSync(`${KV_DIR}/${safe}.json`, JSON.stringify(req.body));
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════
 //  START
 // ═══════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
