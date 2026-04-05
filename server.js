@@ -144,31 +144,29 @@ app.post('/notify', async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  TOURNAMENT IDS  (env vars override these defaults each year)
+//  TOURNAMENT IDS
 // ═══════════════════════════════════════════════════════════════════
-// To find the ID: go to espn.com/golf/leaderboard during a tournament,
-// the number at the end of the URL is the tournament ID.
-//
-// ⚠️  TESTING MODE — Masters slot is currently pointing at the 2026 Valero Texas Open
-//     to test live scoring before the Masters starts Thursday Apr 9.
-//     Before Thursday morning, set this Railway env var to switch back:
-//       ESPN_ID_MASTERS = 401703504
-//
-// 2026 confirmed IDs:
-//   Valero Texas Open:  401811940  (used for testing)
-//   Masters:            401811941  ← CONFIRMED Apr 4 2026
-//   PGA Championship:   TBD — check espn.com/golf/leaderboard week of May 14
-//   US Open:            TBD — check espn.com/golf/leaderboard week of Jun 18
-//   The Open:           TBD — check espn.com/golf/leaderboard week of Jul 16
-// 2025 IDs (for reference only):
-//   Masters: 401703504 · PGA: 401703505 · US Open: 401703506 · The Open: 401703507
+// ESPN IDs (fallback if Slash Golf not configured)
+// 2026 confirmed: Masters=401811941, Texas Open=401811940
 const TOURNAMENT_IDS = {
-  masters: process.env.ESPN_ID_MASTERS || '401811941',  // 2026 Masters (set via env var; fallback confirmed Apr 4 2026)
+  masters: process.env.ESPN_ID_MASTERS || '401811941',
   pga:     process.env.ESPN_ID_PGA     || '401703505',
   usopen:  process.env.ESPN_ID_USOPEN  || '401703506',
   open:    process.env.ESPN_ID_OPEN    || '401703507',
 };
 
+// Slash Golf (RapidAPI) tournament IDs — set via Railway env vars
+// To find: call /schedules endpoint after signing up, find tournId for each major
+// Texas Open 2026: check /schedules response for "Valero Texas Open"
+// Masters 2026:    check /schedules response for "Masters Tournament"
+const SLASH_IDS = {
+  masters: process.env.SLASH_ID_MASTERS || '',
+  pga:     process.env.SLASH_ID_PGA     || '',
+  usopen:  process.env.SLASH_ID_USOPEN  || '',
+  open:    process.env.SLASH_ID_OPEN    || '',
+};
+
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || '';
 
 
 // ═══════════════════════════════════════════════════════════════════
@@ -200,6 +198,9 @@ try {
 function normalize(name) {
   return name
     .toLowerCase()
+    // Explicit replacements for chars that don't decompose via NFD
+    .replace(/ø/g, 'o').replace(/æ/g, 'ae').replace(/ß/g, 'ss')
+    .replace(/þ/g, 'th').replace(/ð/g, 'd').replace(/ł/g, 'l')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')  // strip diacritics
     .replace(/[^a-z\s]/g, '')         // remove punctuation (dots, hyphens, etc.)
@@ -296,24 +297,156 @@ function setCache(key, data) { cache[key] = { data, ts: Date.now() }; }
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  ESPN FETCH
+//  SLASH GOLF FETCH  (primary source when RAPIDAPI_KEY is set)
 // ═══════════════════════════════════════════════════════════════════
+async function fetchSlashGolf(tournId) {
+  const url = `https://live-golf-data.p.rapidapi.com/leaderboard?tournId=${tournId}&year=2026`;
+  const res = await fetch(url, {
+    headers: {
+      'x-rapidapi-key': RAPIDAPI_KEY,
+      'x-rapidapi-host': 'live-golf-data.p.rapidapi.com',
+    },
+    timeout: 10000,
+  });
+  if (!res.ok) throw new Error(`Slash Golf returned ${res.status}`);
+  const data = await res.json();
+
+  const espnPlayers = {};
+  const espnMissedCut = [];
+  const espnRankings = {};
+  let tournamentName = '', status = 'scheduled', currentRound = null;
+
+  // Slash Golf leaderboard structure:
+  // { leaderboard: [ { playerName, position, status, roundScore, ... } ] }
+  const lb = data.leaderboard || data.players || [];
+  tournamentName = data.tournamentName || data.name || '';
+  currentRound   = parseInt(data.currentRound || data.roundId) || null;
+  const state    = (data.status || data.roundStatus || '').toLowerCase();
+  if (state.includes('progress') || state.includes('active')) status = 'in_progress';
+  else if (state.includes('complete') || state.includes('final')) status = 'complete';
+
+  lb.forEach(p => {
+    const name = p.playerName || (p.firstName && p.lastName ? p.firstName + ' ' + p.lastName : null);
+    if (!name) return;
+    const pStatus = (p.status || p.playerStatus || '').toLowerCase();
+    if (pStatus === 'cut' || pStatus === 'wd' || pStatus === 'dq') {
+      espnMissedCut.push(name); return;
+    }
+    const pos = parseInt(String(p.position || p.currentPosition || '').replace(/^T/,''));
+    if (!isNaN(pos) && pos > 0) espnPlayers[name] = pos;
+    if (p.owgrRank || p.worldRanking) espnRankings[name] = parseInt(p.owgrRank || p.worldRanking);
+  });
+
+  console.log(`Slash Golf: ${Object.keys(espnPlayers).length} players, ${espnMissedCut.length} MC`);
+  return { espnPlayers, espnMissedCut, espnRankings, tournamentName, status, currentRound, updatedAt: new Date().toISOString() };
+}
+
+// GET /slash/schedules — fetch current season schedule to find tournIds
+app.get('/slash/schedules', async (req, res) => {
+  if (!RAPIDAPI_KEY) return res.status(400).json({ error: 'RAPIDAPI_KEY not configured in Railway env vars' });
+  try {
+    const r = await fetch('https://live-golf-data.p.rapidapi.com/schedule?year=2026', {
+      headers: { 'x-rapidapi-key': RAPIDAPI_KEY, 'x-rapidapi-host': 'live-golf-data.p.rapidapi.com' },
+    });
+    const data = await r.json();
+    // Return simplified list of tournament name + tournId
+    const schedule = (data.schedule || data.tournaments || data || []).map(t => ({
+      tournId: t.tournId || t.id,
+      name: t.tournamentName || t.name,
+      date: t.date || t.startDate,
+    }));
+    res.json({ count: schedule.length, schedule });
+  } catch(e) { res.status(502).json({ error: e.message }); }
+});
+
+
 async function fetchESPN(majorId) {
   const tournamentId = TOURNAMENT_IDS[majorId];
   if (!tournamentId) throw new Error('Unknown major: ' + majorId);
 
-  const url = `https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?tournamentId=${tournamentId}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; MajorPoolBot/1.0)', 'Accept': 'application/json' },
-    timeout: 10000,
-  });
-  if (!res.ok) throw new Error(`ESPN returned ${res.status}`);
-  const raw = await res.json();
+  // 1. Try Slash Golf first if API key + tournId configured
+  const slashId = SLASH_IDS[majorId];
+  if (RAPIDAPI_KEY && slashId) {
+    try {
+      const result = await fetchSlashGolf(slashId);
+      if (Object.keys(result.espnPlayers).length > 0 || result.espnMissedCut.length > 0) {
+        return result;
+      }
+      console.warn('Slash Golf returned empty data, falling back to ESPN');
+    } catch(e) {
+      console.warn('Slash Golf failed:', e.message, '— falling back to ESPN');
+    }
+  }
+
+  // 2. Try PGA Tour statdata + ESPN URL formats as fallback
+  const urls = [
+    `https://statdata.pgatour.com/r/current/leaderboard-v2.json`,
+    `https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?tournamentId=${tournamentId}`,
+    `https://site.api.espn.com/apis/site/v2/sports/golf/pga-tour/leaderboard?tournamentId=${tournamentId}`,
+    `https://site.web.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?tournamentId=${tournamentId}`,
+    `https://cdn.espn.com/core/golf/leaderboard?tournamentId=${tournamentId}&xhr=1`,
+  ];
+
+  let res, lastErr;
+  const errors = [];
+  for (const url of urls) {
+    try {
+      res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Origin': 'https://www.espn.com',
+          'Referer': 'https://www.espn.com/golf/leaderboard',
+          'sec-fetch-dest': 'empty',
+          'sec-fetch-mode': 'cors',
+          'sec-fetch-site': 'same-site',
+        },
+        timeout: 10000,
+      });
+      if (res.ok) { console.log('Success from:', url); break; }
+      const err = `${res.status} from ${url}`;
+      errors.push(err);
+      console.warn('Failed:', err);
+      res = null;
+    } catch(e) { errors.push(e.message + ' from ' + url); console.warn('Error:', e.message, url); }
+  }
+  if (!res) throw new Error('All sources failed: ' + errors.join(' | '));
+  let raw = await res.json();
 
   const espnPlayers = {};
   const espnMissedCut = [];
   let tournamentName = '', status = 'scheduled', currentRound = null;
   const espnRankings = {}; // name -> OWGR rank
+
+  // ── PGA Tour statdata format ──────────────────────────────────────────────
+  // statdata.pgatour.com returns { leaderboard: { tournament, players: [...] } }
+  if (raw.leaderboard?.players) {
+    const lb = raw.leaderboard;
+    tournamentName = lb.tournament?.tournament_name || '';
+    currentRound = parseInt(lb.tournament?.current_round) || null;
+    const roundState = lb.tournament?.round_state || '';
+    if (roundState === 'Complete' && currentRound === 4) status = 'complete';
+    else if (roundState === 'In Progress' || currentRound > 0) status = 'in_progress';
+
+    lb.players.forEach(p => {
+      const name = (p.player_bio?.first_name + ' ' + p.player_bio?.last_name).trim();
+      if (!name || name === ' ') return;
+      const cut = p.status === 'cut' || p.status === 'wd' || p.status === 'dq';
+      if (cut) { espnMissedCut.push(name); return; }
+      const pos = parseInt(String(p.current_position).replace(/^T/,''));
+      if (!isNaN(pos) && pos > 0) espnPlayers[name] = pos;
+      if (p.player_bio?.owgr_rank) espnRankings[name] = parseInt(p.player_bio.owgr_rank);
+    });
+
+    console.log(`PGA statdata: ${Object.keys(espnPlayers).length} players, ${espnMissedCut.length} MC`);
+    return { espnPlayers, espnMissedCut, espnRankings, tournamentName, status, currentRound, updatedAt: new Date().toISOString() };
+  }
+
+  // ── ESPN format ───────────────────────────────────────────────────────────
+  // cdn.espn.com wraps data in gamepackageJSON
+  if (raw.gamepackageJSON) raw = raw.gamepackageJSON;
 
   try {
     const t = raw.tournaments?.[0] || raw.events?.[0];
@@ -323,7 +456,6 @@ async function fetchESPN(majorId) {
     if (st === 'STATUS_IN_PROGRESS') status = 'in_progress';
     else if (st === 'STATUS_FINAL' || st === 'STATUS_PLAY_COMPLETE') status = 'complete';
 
-    // Extract current round number
     const period = t.status?.period || t.competitions?.[0]?.status?.period;
     if (period) currentRound = parseInt(period);
 
@@ -332,7 +464,6 @@ async function fetchESPN(majorId) {
       const name = c.athlete?.displayName || c.athlete?.shortName || '';
       if (!name) return;
       const sd = c.status?.type?.name || '';
-      // Store OWGR rank — ESPN provides it as athlete.rank or athlete.rankChange context
       const owgr = c.athlete?.rank || c.athlete?.rankings?.worldRanking || null;
       if (owgr) espnRankings[name] = parseInt(owgr);
       if (['STATUS_MISSED_CUT','STATUS_WD','STATUS_DQ'].includes(sd)) {
@@ -523,6 +654,51 @@ app.post('/config/names', (req, res) => {
   res.json({ updated: nameOverrides, count: Object.keys(nameOverrides).length });
 });
 
+// POST /notify/reset — send password reset email
+app.post('/notify/reset', async (req, res) => {
+  const { email, name, resetUrl, poolName } = req.body;
+  if (!email || !resetUrl) return res.status(400).json({ error: 'email and resetUrl required' });
+  if (!mailer) return res.json({ sent: false, reason: 'email not configured' });
+
+  const subject = `Reset your password — ${poolName}`;
+  const html = `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#f9f7f2">
+  <div style="background:#1a1a2e;padding:20px 24px;border-radius:10px 10px 0 0;text-align:center">
+    <h1 style="color:#e8c547;font-size:20px;margin:0">⛳ Jay's 8th Annual Majors Pool</h1>
+  </div>
+  <div style="background:#fff;border:1px solid #e8e0d0;border-top:none;border-radius:0 0 10px 10px;padding:24px">
+    <p style="font-size:15px;margin-bottom:16px">Hi ${name},</p>
+    <p style="font-size:14px;color:#444;margin-bottom:24px">Someone requested a password reset for your account in <strong>${poolName}</strong>. Click the button below to choose a new password. This link expires in 1 hour.</p>
+    <div style="text-align:center;margin-bottom:24px">
+      <a href="${resetUrl}" style="background:#e8c547;color:#111;font-weight:700;padding:12px 28px;border-radius:6px;text-decoration:none;font-size:15px;display:inline-block">Reset My Password →</a>
+    </div>
+    <p style="font-size:12px;color:#999">If you didn't request this, ignore this email — your password won't change.</p>
+    <p style="font-size:11px;color:#bbb;margin-top:16px;word-break:break-all">Or copy this link: ${resetUrl}</p>
+  </div>
+</body></html>`;
+  const text = `Hi ${name},
+
+Reset your password for ${poolName} by visiting this link (expires in 1 hour):
+
+${resetUrl}
+
+If you didn't request this, ignore this email.`;
+
+  try {
+    await mailer.sendMail({
+      from: `"Jay's Majors Pool" <${process.env.SMTP_USER}>`,
+      to: email,
+      subject,
+      text,
+      html,
+    });
+    res.json({ sent: true });
+  } catch(e) {
+    console.error('Reset email error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 // POST /notify/standings — send standings email to all participants after a round
 app.post('/notify/standings', async (req, res) => {
   const { poolName, poolCode, majorName, roundNum, standings, participants } = req.body;
@@ -602,9 +778,20 @@ app.get('/leaderboard/test', async (req, res) => {
   const tourneyId = req.query.id;
   if (!tourneyId) return res.status(400).json({ error: 'id query param required' });
   try {
-    const url = `https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?tournamentId=${tourneyId}`;
-    const espnRes = await fetch(url, { timeout: 10000 });
-    if (!espnRes.ok) throw new Error(`ESPN returned ${espnRes.status}`);
+    const urls = [
+      `https://site.api.espn.com/apis/site/v2/sports/golf/pga/leaderboard?tournamentId=${tourneyId}`,
+      `https://site.api.espn.com/apis/site/v2/sports/golf/pga-tour/leaderboard?tournamentId=${tourneyId}`,
+      `https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard?tournamentId=${tourneyId}`,
+    ];
+    let espnRes, lastErr;
+    for (const url of urls) {
+      try {
+        espnRes = await fetch(url, { timeout: 10000 });
+        if (espnRes.ok) break;
+        lastErr = `ESPN ${espnRes.status} from ${url}`;
+      } catch(e) { lastErr = e.message; }
+    }
+    if (!espnRes || !espnRes.ok) throw new Error(lastErr || 'ESPN unreachable');
     const data = await espnRes.json();
 
     const comp = data.events?.[0]?.competitions?.[0];
