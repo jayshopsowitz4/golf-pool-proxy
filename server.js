@@ -1,4 +1,3 @@
-
 /**
  * Major Pool — Proxy Server
  *
@@ -538,6 +537,7 @@ app.get('/health', (req, res) => res.json({
   rapidapi: RAPIDAPI_KEY ? 'configured (' + RAPIDAPI_KEY.slice(0,8) + '...)' : 'NOT SET',
   slashIds: SLASH_IDS,
   tournamentIds: TOURNAMENT_IDS,
+  envKeys: Object.keys(process.env).filter(k => !k.includes('SECRET') && !k.includes('PASSWORD') && !k.includes('PASS')),
 }));
 
 // Main leaderboard route
