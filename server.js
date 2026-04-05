@@ -442,27 +442,27 @@ async function fetchESPN(majorId) {
   let tournamentName = '', status = 'scheduled', currentRound = null;
   const espnRankings = {}; // name -> OWGR rank
 
-  // ── PGA Tour statdata format ──────────────────────────────────────────────
-  // statdata.pgatour.com returns { leaderboard: { tournament, players: [...] } }
-  if (raw.leaderboard?.players) {
-    const lb = raw.leaderboard;
-    tournamentName = lb.tournament?.tournament_name || '';
-    currentRound = parseInt(lb.tournament?.current_round) || null;
-    const roundState = lb.tournament?.round_state || '';
-    if (roundState === 'Complete' && currentRound === 4) status = 'complete';
-    else if (roundState === 'In Progress' || currentRound > 0) status = 'in_progress';
+  // ── Slash Golf format ─────────────────────────────────────────────────────
+  // Returns { orgId, tournId, status, roundId, leaderboardRows: [...] }
+  if (raw.leaderboardRows) {
+    tournamentName = 'Valero Texas Open'; // will be overridden per major
+    currentRound   = raw.roundId?.$numberInt ? parseInt(raw.roundId.$numberInt) : parseInt(raw.roundId) || null;
+    const state    = (raw.status || '').toLowerCase();
+    if (state === 'in progress') status = 'in_progress';
+    else if (state === 'complete' || state === 'final') status = 'complete';
 
-    lb.players.forEach(p => {
-      const name = (p.player_bio?.first_name + ' ' + p.player_bio?.last_name).trim();
-      if (!name || name === ' ') return;
-      const cut = p.status === 'cut' || p.status === 'wd' || p.status === 'dq';
-      if (cut) { espnMissedCut.push(name); return; }
-      const pos = parseInt(String(p.current_position).replace(/^T/,''));
+    raw.leaderboardRows.forEach(p => {
+      const name = ((p.firstName || '') + ' ' + (p.lastName || '')).trim();
+      if (!name) return;
+      const pStatus = (p.status || '').toLowerCase();
+      if (pStatus === 'cut' || pStatus === 'wd' || pStatus === 'dq') {
+        espnMissedCut.push(name); return;
+      }
+      const pos = parseInt(String(p.position || '').replace(/^T/,''));
       if (!isNaN(pos) && pos > 0) espnPlayers[name] = pos;
-      if (p.player_bio?.owgr_rank) espnRankings[name] = parseInt(p.player_bio.owgr_rank);
     });
 
-    console.log(`PGA statdata: ${Object.keys(espnPlayers).length} players, ${espnMissedCut.length} MC`);
+    console.log(`Slash Golf leaderboardRows: ${Object.keys(espnPlayers).length} players, ${espnMissedCut.length} MC`);
     return { espnPlayers, espnMissedCut, espnRankings, tournamentName, status, currentRound, updatedAt: new Date().toISOString() };
   }
 
