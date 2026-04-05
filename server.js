@@ -316,17 +316,16 @@ async function fetchSlashGolf(tournId) {
   const espnRankings = {};
   let tournamentName = '', status = 'scheduled', currentRound = null;
 
-  // Slash Golf leaderboard structure:
-  // { leaderboard: [ { playerName, position, status, roundScore, ... } ] }
-  const lb = data.leaderboard || data.players || [];
+  // Slash Golf returns { leaderboardRows: [...] }
+  const lb = data.leaderboardRows || data.leaderboard || data.players || [];
   tournamentName = data.tournamentName || data.name || '';
-  currentRound   = parseInt(data.currentRound || data.roundId) || null;
+  currentRound   = data.roundId?.$numberInt ? parseInt(data.roundId.$numberInt) : parseInt(data.currentRound || data.roundId) || null;
   const state    = (data.status || data.roundStatus || '').toLowerCase();
   if (state.includes('progress') || state.includes('active')) status = 'in_progress';
   else if (state.includes('complete') || state.includes('final')) status = 'complete';
 
   lb.forEach(p => {
-    const name = p.playerName || (p.firstName && p.lastName ? p.firstName + ' ' + p.lastName : null);
+    const name = (p.firstName && p.lastName) ? (p.firstName + ' ' + p.lastName).trim() : (p.playerName || '');
     if (!name) return;
     const pStatus = (p.status || p.playerStatus || '').toLowerCase();
     if (pStatus === 'cut' || pStatus === 'wd' || pStatus === 'dq') {
