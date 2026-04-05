@@ -1,3 +1,4 @@
+
 /**
  * Major Pool — Proxy Server
  *
@@ -531,7 +532,13 @@ app.get('/', (req, res) => res.json({
   ],
 }));
 
-app.get('/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }));
+app.get('/health', (req, res) => res.json({
+  ok: true,
+  uptime: process.uptime(),
+  rapidapi: RAPIDAPI_KEY ? 'configured (' + RAPIDAPI_KEY.slice(0,8) + '...)' : 'NOT SET',
+  slashIds: SLASH_IDS,
+  tournamentIds: TOURNAMENT_IDS,
+}));
 
 // Main leaderboard route
 app.get('/leaderboard/:majorId', async (req, res) => {
