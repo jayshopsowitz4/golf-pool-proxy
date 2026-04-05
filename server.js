@@ -341,7 +341,29 @@ async function fetchSlashGolf(tournId) {
   return { espnPlayers, espnMissedCut, espnRankings, tournamentName, status, currentRound, updatedAt: new Date().toISOString() };
 }
 
-// GET /slash/schedules — fetch current season schedule to find tournIds
+// GET /slash/test/:majorId — test Slash Golf directly
+app.get('/slash/test/:majorId', async (req, res) => {
+  const { majorId } = req.params;
+  if (!RAPIDAPI_KEY) return res.status(400).json({ error: 'RAPIDAPI_KEY not set' });
+  const slashId = SLASH_IDS[majorId];
+  if (!slashId) return res.status(400).json({ error: `SLASH_ID_${majorId.toUpperCase()} not set`, slashIds: SLASH_IDS });
+  try {
+    const url = `https://live-golf-data.p.rapidapi.com/leaderboard?tournId=${slashId}&year=2026`;
+    const r = await fetch(url, {
+      headers: {
+        'x-rapidapi-key': RAPIDAPI_KEY,
+        'x-rapidapi-host': 'live-golf-data.p.rapidapi.com',
+      },
+      timeout: 10000,
+    });
+    const text = await r.text();
+    res.json({ status: r.status, ok: r.ok, url, body: JSON.parse(text) });
+  } catch(e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+
 app.get('/slash/schedules', async (req, res) => {
   if (!RAPIDAPI_KEY) return res.status(400).json({ error: 'RAPIDAPI_KEY not configured in Railway env vars' });
   try {
